@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Project outputs / data
+out/
+*.bedgraph
+*.wig
+*.gff3
+
+# Models / weights / secrets — never commit
+*.pt
+*.safetensors
+.env
+*.key
+*.pem
+*.ppk
+
+# Packaging (.exe builds) and local result folders
+*.exe
+evo_results/
+runs/
