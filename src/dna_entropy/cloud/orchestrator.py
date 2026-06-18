@@ -167,6 +167,10 @@ def run_in_cloud(
     typer.echo(f"  account: {account}")
     typer.echo(f"  project: {project}")
     state = load_state()
+    # Fall back to a configured key (helps machines with a locked-down ~/.ssh, and lets
+    # power users pin one). Real users leave it unset and gcloud manages default keys.
+    if cfg.ssh_key_file is None:
+        cfg.ssh_key_file = state.get("ssh_key_file")
     vm = f"dna-entropy-{uuid.uuid4().hex[:8]}"
 
     zone = _create_vm(vm, cfg, project, state)

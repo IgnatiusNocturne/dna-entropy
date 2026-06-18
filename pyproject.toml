@@ -21,6 +21,8 @@ dev = ["pytest>=7"]
 evo = ["torch", "evo2"]
 # Gene boundaries (optional, prokaryotic).
 genes = ["pyrodigal>=3"]
+# Building the double-click Windows .exe (see packaging/build_exe.ps1).
+package = ["pyinstaller>=6"]
 
 [project.scripts]
 dna-entropy = "dna_entropy.cli:main"
