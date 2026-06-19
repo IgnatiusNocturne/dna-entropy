@@ -132,7 +132,7 @@ def cloudrun(
     out: Optional[str] = typer.Option(None, "--out", "-o", help="Base folder (default: your Downloads); files go in <out>/<name>/."),
     genes: bool = typer.Option(True, "--genes/--no-genes", help="Call gene boundaries (default on)."),
     rna: bool = typer.Option(False, "--rna", help="Convert U->T (treat input as RNA)."),
-    keep: bool = typer.Option(False, "--keep", help="Keep the VM after the run (it KEEPS CHARGING; you'll be double-confirmed)."),
+    keep: bool = typer.Option(False, "--keep", help="Keep the box (stopped) for fast reuse next time, instead of deleting it (double-confirmed; ~$10/mo disk)."),
     project: Optional[str] = typer.Option(None, "--project", help="GCP project (default: your active gcloud project)."),
     zone: Optional[str] = typer.Option(None, "--zone", help="Force a GPU zone (default: auto, retries on stockout)."),
     ssh_key_file: Optional[str] = typer.Option(None, "--ssh-key-file", help="Custom SSH key file (advanced/testing)."),

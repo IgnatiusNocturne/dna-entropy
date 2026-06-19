@@ -5,7 +5,7 @@ a = Analysis(
     ['packaging\\launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('src/dna_entropy', '_pkgsrc')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

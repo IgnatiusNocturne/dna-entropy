@@ -43,6 +43,8 @@ def _run(
         [exe, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",  # gcloud/pip output isn't always cp1252-decodable on Windows
         timeout=timeout,
         input=stdin_text,
     )
@@ -74,23 +76,56 @@ def create_vm(
     zone: str,
     *,
     machine_type: str,
-    image: str,
-    image_project: Optional[str],
+    accelerator: str,
+    image_family: str,
+    image_project: str,
+    boot_disk_gb: int = 100,
     project: Optional[str] = None,
     timeout: float = 600,
 ) -> None:
-    """Create a GPU VM from ``image``. Raises GcloudError (with stderr) on failure."""
+    """Create a GPU VM from a PUBLIC image family. Raises GcloudError on failure."""
     args = [
         "compute", "instances", "create", name,
         f"--zone={zone}",
         f"--machine-type={machine_type}",
-        "--accelerator=type=nvidia-l4,count=1",
-        f"--image={image}",
+        f"--accelerator=type={accelerator},count=1",
+        f"--image-family={image_family}",
+        f"--image-project={image_project}",
+        f"--boot-disk-size={boot_disk_gb}GB",
+        "--boot-disk-type=pd-balanced",
         "--maintenance-policy=TERMINATE",
         "--restart-on-failure",
     ]
-    if image_project:
-        args.append(f"--image-project={image_project}")
+    if project:
+        args.append(f"--project={project}")
+    _run(args, timeout=timeout, check=True)
+
+
+def find_instance(name: str, project: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """Return (zone, status) of the named instance if it exists, else None."""
+    args = [
+        "compute", "instances", "list",
+        f"--filter=name={name}",
+        "--format=value(zone.basename(),status)",
+    ]
+    if project:
+        args.append(f"--project={project}")
+    out = _run(args, check=False).stdout.strip()
+    if not out:
+        return None
+    parts = out.split()
+    return (parts[0], parts[1]) if len(parts) >= 2 else None
+
+
+def start_vm(name: str, zone: str, *, project: Optional[str] = None, timeout: float = 300) -> None:
+    args = ["compute", "instances", "start", name, f"--zone={zone}"]
+    if project:
+        args.append(f"--project={project}")
+    _run(args, timeout=timeout, check=True)
+
+
+def stop_vm(name: str, zone: str, *, project: Optional[str] = None, timeout: float = 300) -> None:
+    args = ["compute", "instances", "stop", name, f"--zone={zone}"]
     if project:
         args.append(f"--project={project}")
     _run(args, timeout=timeout, check=True)

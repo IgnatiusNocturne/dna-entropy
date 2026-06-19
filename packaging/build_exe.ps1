@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 
 .\.venv\Scripts\python.exe -m PyInstaller --onefile --name dna-entropy --console `
     --exclude-module torch --exclude-module evo2 --exclude-module flash_attn --exclude-module pyrodigal `
+    --add-data "src/dna_entropy;_pkgsrc" `
     --noconfirm packaging\launcher.py
 
 Write-Host ""

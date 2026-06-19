@@ -72,7 +72,10 @@ def main() -> None:
         app()
         return
     _wizard()
-    input("\nPress Enter to close...")
+    try:
+        input("\nPress Enter to close...")
+    except EOFError:
+        pass  # no interactive console (e.g. piped input) — just exit cleanly
 
 
 if __name__ == "__main__":

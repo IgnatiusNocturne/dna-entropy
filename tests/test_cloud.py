@@ -10,7 +10,7 @@ import pytest
 from dna_entropy.cloud import gcloud
 from dna_entropy.cloud.orchestrator import (
     CloudConfig,
-    _create_vm,  # noqa: F401  (imported to ensure module loads)
+    _create_box,  # noqa: F401  (imported to ensure module loads)
     _ordered_zones,
     load_state,
     preflight,
