@@ -14,7 +14,9 @@ import os
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -32,14 +34,43 @@ BASE_IMAGE_FAMILY = "pytorch-2-9-cu129-ubuntu-2404-nvidia-580"
 BASE_IMAGE_PROJECT = "deeplearning-platform-release"
 
 # GPU choices to try, cheapest first; A100 is the stockout fallback (different pool).
+# L4 quota is granted by default on new projects; A100 requires a manual quota request.
 OFFERS = [
     ("g2-standard-8", "nvidia-l4", "L4"),
     ("a2-highgpu-1g", "nvidia-tesla-a100", "A100"),
 ]
 DEFAULT_ZONES = [
+    # US
     "us-central1-a", "us-central1-b", "us-central1-c", "us-central1-f",
-    "us-east1-b", "us-east1-c", "us-east1-d", "us-east4-a", "us-east4-c",
-    "us-west1-a", "us-west1-b", "us-west4-a",
+    "us-east1-b", "us-east1-c", "us-east1-d",
+    "us-east4-a", "us-east4-b", "us-east4-c",
+    "us-west1-a", "us-west1-b", "us-west1-c",
+    "us-west4-a", "us-west4-b",
+    "us-south1-a", "us-south1-b", "us-south1-c",
+    # Europe
+    "europe-west1-b", "europe-west1-c", "europe-west1-d",
+    "europe-west2-a", "europe-west2-b", "europe-west2-c",
+    "europe-west3-a", "europe-west3-b", "europe-west3-c",
+    "europe-west4-a", "europe-west4-b", "europe-west4-c",
+    "europe-west6-a", "europe-west6-b", "europe-west6-c",
+    "europe-north1-a", "europe-north1-b", "europe-north1-c",
+    "europe-central2-a", "europe-central2-b", "europe-central2-c",
+    # Asia-Pacific
+    "asia-east1-a", "asia-east1-b", "asia-east1-c",
+    "asia-east2-a", "asia-east2-b", "asia-east2-c",
+    "asia-northeast1-a", "asia-northeast1-b", "asia-northeast1-c",
+    "asia-northeast3-a", "asia-northeast3-b", "asia-northeast3-c",
+    "asia-south1-a", "asia-south1-b", "asia-south1-c",
+    "asia-south2-a", "asia-south2-b", "asia-south2-c",
+    "asia-southeast1-a", "asia-southeast1-b", "asia-southeast1-c",
+    "asia-southeast2-a", "asia-southeast2-b", "asia-southeast2-c",
+    "australia-southeast1-a", "australia-southeast1-b", "australia-southeast1-c",
+    # Middle East / Americas
+    "me-central1-a", "me-central1-b", "me-central1-c",
+    "me-west1-a", "me-west1-b", "me-west1-c",
+    "southamerica-east1-a", "southamerica-east1-b", "southamerica-east1-c",
+    "southamerica-west1-a", "southamerica-west1-b", "southamerica-west1-c",
+    "northamerica-northeast1-a", "northamerica-northeast1-b", "northamerica-northeast1-c",
 ]
 
 # Installed on a fresh VM, from public sources only. Idempotent (fast on a reused box).
@@ -75,11 +106,23 @@ _PROJECT_MSG = """No Google Cloud project is set.
   Create one at https://console.cloud.google.com/projectcreate
   Then run:  gcloud config set project YOUR_PROJECT_ID"""
 
-_QUOTA_MSG = """Your project has no GPU quota yet - this is a one-time request.
-  1. Open: https://console.cloud.google.com/iam-admin/quotas
-  2. Filter for 'NVIDIA L4 GPUs' (and optionally 'NVIDIA A100'), tick a region, EDIT QUOTAS.
-  3. Request a limit of 1 and submit. Approval is usually minutes.
-  4. Re-run this app once it's approved."""
+def _quota_msg(label: str, accel: str) -> str:
+    """Return a quota error message specific to the GPU type that was denied."""
+    if "l4" in accel.lower():
+        metric = "NVIDIA_L4_GPUS"
+    else:
+        metric = "NVIDIA_A100_GPUS"
+    return (
+        f"Your project has no {label} GPU quota yet - this is a one-time request.\n"
+        "  1. Open: https://console.cloud.google.com/iam-admin/quotas\n"
+        "  2. Filter by:\n"
+        "       Service:  Compute Engine API\n"
+        f"       Metric:   {metric}\n"
+        "     Tick a zone in YOUR region (e.g. us-central1 for US, europe-west4 for EU),\n"
+        "     then click EDIT QUOTAS.\n"
+        "  3. Request a limit of 1 and submit. L4 quota is usually auto-approved in minutes.\n"
+        "  4. Re-run this app once it is approved."
+    )
 
 
 @dataclass
@@ -146,33 +189,164 @@ def _ordered_zones(cfg: CloudConfig, state: dict) -> list[str]:
     return zones
 
 
-def _create_box(project: str, state: dict, cfg: CloudConfig) -> str:
-    """Create BOX_NAME, trying each GPU offer across zones; return the zone."""
-    last_err = ""
-    for machine, accel, label in cfg.offers:
-        for zone in _ordered_zones(cfg, state):
-            try:
-                with Spinner(f"[create] Starting a {label} VM in {zone}"):
-                    gcloud.create_vm(
-                        BOX_NAME, zone,
-                        machine_type=machine, accelerator=accel,
-                        image_family=cfg.image_family, image_project=cfg.image_project,
-                        boot_disk_gb=cfg.boot_disk_gb, project=project,
-                    )
-                state["last_zone"] = zone
-                save_state(state)
-                return zone
-            except gcloud.GcloudError as exc:
-                last_err = str(exc)
-                kind = gcloud.classify_create_error(last_err)
-                if kind == "quota":
-                    raise gcloud.GcloudError(_QUOTA_MSG) from exc
-                if kind == "permission":
-                    raise
+def _attempt_create(zone: str, machine: str, accel: str, project: str, cfg: CloudConfig) -> None:
+    """Create BOX_NAME in one zone; raises GcloudError on failure."""
+    gcloud.create_vm(
+        BOX_NAME, zone,
+        machine_type=machine, accelerator=accel,
+        image_family=cfg.image_family, image_project=cfg.image_project,
+        boot_disk_gb=cfg.boot_disk_gb, project=project,
+    )
+
+
+def _try_sequential(zones: list[str], machine: str, accel: str, label: str,
+                    project: str, cfg: CloudConfig) -> tuple[Optional[str], bool, bool]:
+    """Try zones one at a time.
+
+    Returns (winning_zone, had_quota_error, was_pre_existing).
+    Never raises on quota/stockout/already_exists — only on permission errors.
+    """
+    had_quota = False
+    for zone in zones:
+        try:
+            with Spinner(f"[create] Starting a {label} VM in {zone}"):
+                _attempt_create(zone, machine, accel, project, cfg)
+            return zone, had_quota, False
+        except gcloud.GcloudError as exc:
+            kind = gcloud.classify_create_error(str(exc))
+            if kind == "permission":
+                raise
+            if kind == "already_exists":
+                typer.secho(f"      {zone}: box already exists here - reusing it", fg=typer.colors.CYAN)
+                return zone, had_quota, True
+            if kind == "quota":
+                had_quota = True
+                typer.secho(f"      {zone}: no {label} quota in this region, continuing...", fg=typer.colors.YELLOW)
+            else:
                 typer.secho(f"      {zone}: no {label} capacity, trying next...", fg=typer.colors.YELLOW)
-        typer.secho(f"  {label} unavailable everywhere; trying a bigger GPU...", fg=typer.colors.YELLOW)
+    return None, had_quota, False
+
+
+def _try_parallel(zones: list[str], machine: str, accel: str, label: str,
+                  project: str, cfg: CloudConfig) -> tuple[Optional[str], bool, bool]:
+    """Try zones simultaneously; return (first_winner, had_quota_error, was_pre_existing).
+
+    Cleans up any extra VMs that also succeeded. Never raises on quota/stockout.
+    """
+    typer.echo(f"  Trying {len(zones)} zones in parallel: {', '.join(zones)}")
+
+    lock = threading.Lock()
+    winner: list[Optional[str]] = [None]
+    had_quota: list[bool] = [False]
+    pre_existing: list[bool] = [False]
+
+    def attempt(zone: str) -> tuple:
+        try:
+            _attempt_create(zone, machine, accel, project, cfg)
+            with lock:
+                if winner[0] is None:
+                    winner[0] = zone
+                    return ("ok", zone, False)
+                return ("extra", zone, False)
+        except gcloud.GcloudError as exc:
+            kind = gcloud.classify_create_error(str(exc))
+            if kind == "quota":
+                with lock:
+                    had_quota[0] = True
+            if kind == "already_exists":
+                with lock:
+                    if winner[0] is None:
+                        winner[0] = zone
+                        pre_existing[0] = True
+                        return ("ok", zone, True)
+                    return ("extra", zone, True)
+            return ("fail", zone, kind)
+
+    with ThreadPoolExecutor(max_workers=len(zones)) as executor:
+        results = list(executor.map(attempt, zones))
+
+    for result in results:
+        if result[0] == "ok":
+            label_str = "box already exists here - reusing" if result[2] else f"{label} VM ready!"
+            typer.secho(f"      {result[1]}: {label_str}", fg=typer.colors.CYAN if result[2] else typer.colors.GREEN)
+        elif result[0] == "extra":
+            if not result[2]:  # don't delete a pre-existing VM we didn't create
+                typer.secho(f"      {result[1]}: also came up - removing duplicate", fg=typer.colors.YELLOW)
+                try:
+                    gcloud.delete_vm(BOX_NAME, result[1], project=project)
+                except Exception:
+                    pass
+        else:
+            _, zone, kind = result
+            if kind == "quota":
+                typer.secho(f"      {zone}: no {label} quota in this region", fg=typer.colors.YELLOW)
+            else:
+                typer.secho(f"      {zone}: no {label} capacity", fg=typer.colors.YELLOW)
+
+    return winner[0], had_quota[0], pre_existing[0]
+
+
+def _create_box(project: str, state: dict, cfg: CloudConfig) -> tuple[str, bool]:
+    """Create BOX_NAME across zones with escalating parallelism.
+
+    Returns (zone, created) where created=False means a pre-existing VM was found.
+    Per GPU tier: 3 sequential -> 3 parallel -> 5 parallel -> 7 parallel (repeat).
+    Quota errors in individual regions do NOT abort — we keep trying other regions.
+    Only escalates to A100 after all L4 zones are exhausted.
+    """
+    for machine, accel, label in cfg.offers:
+        zones = _ordered_zones(cfg, state)
+        any_quota = False
+
+        def _win(zone: str, created: bool) -> tuple[str, bool]:
+            state["last_zone"] = zone
+            save_state(state)
+            return zone, created
+
+        # Phase 1: first 3 sequential (fast feedback, common case)
+        seq, zones = zones[:3], zones[3:]
+        won, q, existing = _try_sequential(seq, machine, accel, label, project, cfg)
+        any_quota = any_quota or q
+        if won:
+            return _win(won, not existing)
+
+        # Phase 2: next 3 parallel
+        if zones:
+            batch, zones = zones[:3], zones[3:]
+            typer.secho("  Sequential attempts exhausted; switching to parallel...", fg=typer.colors.YELLOW)
+            won, q, existing = _try_parallel(batch, machine, accel, label, project, cfg)
+            any_quota = any_quota or q
+            if won:
+                return _win(won, not existing)
+
+        # Phase 3: next 5 parallel
+        if zones:
+            batch, zones = zones[:5], zones[5:]
+            won, q, existing = _try_parallel(batch, machine, accel, label, project, cfg)
+            any_quota = any_quota or q
+            if won:
+                return _win(won, not existing)
+
+        # Phase 4+: batches of 7 until all zones are tried
+        while zones:
+            batch, zones = zones[:7], zones[7:]
+            won, q, existing = _try_parallel(batch, machine, accel, label, project, cfg)
+            any_quota = any_quota or q
+            if won:
+                return _win(won, not existing)
+
+        if any_quota:
+            typer.secho(
+                f"  NOTE: some regions had no {label} quota. "
+                "If you have quota, those regions will work on retry.",
+                fg=typer.colors.YELLOW,
+            )
+        typer.secho(f"  {label} unavailable in all zones; trying a bigger GPU...", fg=typer.colors.YELLOW)
+
     raise gcloud.GcloudError(
-        f"No GPU capacity (L4 or A100) in any zone right now. Try again shortly.\nlast error: {last_err}"
+        "No GPU capacity found in any zone right now.\n"
+        "  - For L4: stockout is common; try again in a few minutes.\n"
+        f"  - If you saw quota warnings above:\n{_quota_msg('L4', 'nvidia-l4')}"
     )
 
 
@@ -222,13 +396,13 @@ def run_in_cloud(
     created = False
     if existing:
         zone, status = existing
-        typer.secho(f"  Found your saved box in {zone} ({status}) - reusing it.", fg=typer.colors.CYAN)
-        if status != "RUNNING":
+        typer.secho(f"  Found your saved box in {zone} ({status or 'starting'}) - reusing it.", fg=typer.colors.CYAN)
+        if status in ("TERMINATED", "STOPPED", "SUSPENDED"):
             with Spinner(f"[start] Starting your saved box in {zone}"):
                 gcloud.start_vm(BOX_NAME, zone, project=project)
+        # RUNNING / STAGING / PROVISIONING / blank (transitional) — leave it alone
     else:
-        zone = _create_box(project, state, cfg)
-        created = True
+        zone, created = _create_box(project, state, cfg)
 
     try:
         _wait_for_ssh(BOX_NAME, zone, cfg, project)

@@ -4,7 +4,6 @@ __pycache__/
 *.egg-info/
 .eggs/
 build/
-dist/
 .venv/
 venv/
 .pytest_cache/
@@ -26,6 +25,5 @@ out/
 *.ppk
 
 # Packaging (.exe builds) and local result folders
-*.exe
 evo_results/
 runs/

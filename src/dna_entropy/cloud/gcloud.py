@@ -102,7 +102,12 @@ def create_vm(
 
 
 def find_instance(name: str, project: Optional[str] = None) -> Optional[tuple[str, str]]:
-    """Return (zone, status) of the named instance if it exists, else None."""
+    """Return (zone, status) of the named instance if it exists, else None.
+
+    Handles blank status (transitional VM state) and multiple results (parallel
+    creation left duplicates) by returning the first RUNNING result, or the first
+    result of any kind if none are RUNNING.
+    """
     args = [
         "compute", "instances", "list",
         f"--filter=name={name}",
@@ -113,8 +118,20 @@ def find_instance(name: str, project: Optional[str] = None) -> Optional[tuple[st
     out = _run(args, check=False).stdout.strip()
     if not out:
         return None
-    parts = out.split()
-    return (parts[0], parts[1]) if len(parts) >= 2 else None
+    candidates: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            candidates.append((parts[0], parts[1]))
+        elif len(parts) == 1:
+            candidates.append((parts[0], ""))  # zone known, status blank (transitional)
+    if not candidates:
+        return None
+    # Prefer a RUNNING instance if there are multiple (parallel batch left duplicates).
+    for c in candidates:
+        if c[1] == "RUNNING":
+            return c
+    return candidates[0]
 
 
 def start_vm(name: str, zone: str, *, project: Optional[str] = None, timeout: float = 300) -> None:
@@ -181,7 +198,7 @@ def delete_vm(
 
 
 def classify_create_error(stderr: str) -> str:
-    """Bucket a create failure so we can give the right guidance: quota|stockout|permission|other."""
+    """Bucket a create failure: quota|stockout|already_exists|permission|other."""
     s = stderr.lower()
     if "quota" in s:
         return "quota"
@@ -191,6 +208,8 @@ def classify_create_error(stderr: str) -> str:
         or "does not have enough resources" in s
     ):
         return "stockout"
+    if "already exists" in s or "resource already exists" in s:
+        return "already_exists"
     if "permission" in s or "forbidden" in s or "not authorized" in s:
         return "permission"
     return "other"
